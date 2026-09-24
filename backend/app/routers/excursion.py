@@ -1,12 +1,16 @@
-"""温度异常接口：维护温度异常事件，覆盖受理事件、提交处置、忽略事件等动作。"""
+"""温度异常接口：维护温度异常事件与按异常类型配置的超限判定规则。"""
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.excursion import ExcursionService
+from app.services.excursion import (
+    DEFAULT_RULE_LABEL,
+    ExcursionService,
+)
 
 router = APIRouter(prefix="/api/excursion", tags=["温度异常"])
 
@@ -14,6 +18,14 @@ service = ExcursionService()
 
 LIST_FIELDS = ["事件编号", "关联运单", "异常类型", "超限时长", "最高温度", "发生时间", "处置人"]
 STATUSES = ["待处置", "处置中", "已闭环", "已忽略"]
+
+
+class RulePayload(BaseModel):
+    """按异常类型提交的超限判定规则。"""
+
+    abnormalType: str
+    maxDuration: Any
+    maxTemperature: Any
 
 
 @router.get("", response_model=PageResult[dict])
@@ -28,6 +40,42 @@ def list_entries(
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/rules")
+def list_rules() -> dict[str, Any]:
+    """返回各异常类型的超限判定规则、可用性与默认口径说明。"""
+    return {"defaultRule": DEFAULT_RULE_LABEL, "items": service.list_rules()}
+
+
+@router.put("/rules", response_model=ActionResult)
+def save_rule(payload: RulePayload) -> ActionResult:
+    """新增/更新某异常类型的允许超限时长上限与最高温度上限。
+
+    填写无效（缺失、非数字、负数）时拒绝写入并说明原因，原有规则与判定保持不变。
+    """
+    rule, message = service.save_rule(
+        payload.abnormalType, payload.maxDuration, payload.maxTemperature
+    )
+    if rule is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=rule)
+
+
+@router.delete("/rules/{abnormal_type}", response_model=ActionResult)
+def delete_rule(abnormal_type: str) -> ActionResult:
+    """删除某异常类型的专属规则，删除后相关事件沿用系统默认口径。"""
+    ok, message = service.delete_rule(abnormal_type)
+    if not ok:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出温度异常清单：返回当前过滤条件下的全量数据（含判定结论）。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "excursion", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +104,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出温度异常清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "excursion", "total": total, "items": items}
